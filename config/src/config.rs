@@ -594,6 +594,12 @@ pub struct Config {
     #[dynamic(default = "default_win32_acrylic_accent_color")]
     pub win32_acrylic_accent_color: RgbaColor,
 
+    /// Only works on Windows, with `front_end = "WebGpu"`.
+    /// When non-zero, wezterm draws its own blurred backdrop behind the
+    /// window with this blur radius, instead of using `win32_system_backdrop`.
+    #[dynamic(default)]
+    pub win32_window_background_blur: i64,
+
     /// Specifies the alpha value to use when rendering the background
     /// of the window.  The background is taken either from the
     /// window_background_image, or if there is none, the background

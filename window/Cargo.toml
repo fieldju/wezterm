@@ -66,6 +66,22 @@ windows = { workspace=true, features = [
     "UI_ViewManagement",
     "Win32_Devices_Display",
 ]}
+windows-58 = { workspace=true, features = [
+    "implement",
+    "Foundation",
+    "Foundation_Numerics",
+    "Graphics_Effects",
+    "System",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Win32_Foundation",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Security",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
+]}
+windows-core.workspace = true
 winreg.workspace = true
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]

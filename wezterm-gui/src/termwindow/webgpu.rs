@@ -223,13 +223,37 @@ impl WebGpuState {
         dimensions: Dimensions,
         config: &ConfigHandle,
     ) -> anyhow::Result<Self> {
-        let backends = wgpu::Backends::all();
+        // With `win32_window_background_blur`, the window has no
+        // redirection surface; we present into the composition surface that
+        // sits on top of its blurred backdrop instead. That requires DX12.
+        #[cfg(windows)]
+        let composition_surface = match handle.window {
+            RawWindowHandle::Win32(h) => {
+                window::os::windows::backdrop::composition_surface_handle(h.hwnd.get())
+            }
+            _ => None,
+        };
+        #[cfg(not(windows))]
+        let composition_surface: Option<isize> = None;
+
+        let backends = if composition_surface.is_some() {
+            wgpu::Backends::DX12
+        } else {
+            wgpu::Backends::all()
+        };
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,
             ..Default::default()
         });
         let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&handle)?)?
+            match composition_surface {
+                #[cfg(windows)]
+                Some(surface_handle) => instance.create_surface_unsafe(
+                    wgpu::SurfaceTargetUnsafe::SurfaceHandle(surface_handle as *mut _),
+                )?,
+                _ => instance
+                    .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::from_window(&handle)?)?,
+            }
         };
 
         let mut adapter: Option<wgpu::Adapter> = None;
@@ -365,7 +389,16 @@ impl WebGpuState {
             width: dimensions.pixel_width as u32,
             height: dimensions.pixel_height as u32,
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: if caps
+            // DirectComposition swapchains only support premultiplied alpha.
+            // Our blending onto a transparent clear already produces
+            // premultiplied output.
+            alpha_mode: if composition_surface.is_some()
+                && caps
+                    .alpha_modes
+                    .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+            {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else if caps
                 .alpha_modes
                 .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
             {

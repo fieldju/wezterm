@@ -267,6 +267,11 @@ winapi = "0.3.9"
 window = {path="window"}
 window-funcs = { path = "lua-api-crates/window-funcs" }
 windows = "0.33.0"
+# Newer windows-rs used for the Windows.UI.Composition backdrop; already
+# in the dependency graph via wgpu-hal's DX12 backend.
+windows-58 = { package = "windows", version = "0.58" }
+# Required by windows-58's #[implement] macro, which refers to ::windows_core.
+windows-core = "0.58"
 windows-sys = { version = "0.61.2", default-features = false }
 winreg = "0.10"
 x11 = "2.21"

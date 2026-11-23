@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{bail, Context};
 use async_trait::async_trait;
-use config::{ConfigHandle, ImePreeditRendering, SystemBackdrop};
+use config::{ConfigHandle, FrontEndSelection, ImePreeditRendering, SystemBackdrop};
 use lazy_static::lazy_static;
 use promise::Future;
 use raw_window_handle::{
@@ -127,6 +127,16 @@ pub(crate) struct WindowInner {
     config: ConfigHandle,
     paint_throttled: bool,
     invalidated: bool,
+
+    /// Our own blurred backdrop, when `win32_window_background_blur` is in use
+    backdrop: Option<super::backdrop::BlurredBackdrop>,
+}
+
+/// `win32_window_background_blur` needs a window created without a
+/// redirection surface and a renderer that can present into a composition
+/// surface, which is only the WebGpu (DX12) front end.
+fn wants_blurred_backdrop(config: &ConfigHandle) -> bool {
+    config.win32_window_background_blur > 0 && config.front_end == FrontEndSelection::WebGpu
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -481,9 +491,18 @@ impl Window {
         };
 
         let name = wide_string(name);
+        // With our own composition backdrop, everything is drawn through
+        // Windows.UI.Composition, so the window must not have a redirection
+        // surface (it would be drawn on top of our visuals).
+        const WS_EX_NOREDIRECTIONBITMAP: DWORD = 0x0020_0000;
+        let ex_style = if wants_blurred_backdrop(&config) {
+            WS_EX_NOREDIRECTIONBITMAP
+        } else {
+            0
+        };
         let hwnd = unsafe {
             CreateWindowExW(
-                0,
+                ex_style,
                 class_name.as_ptr(),
                 name.as_ptr(),
                 style,
@@ -547,6 +566,7 @@ impl Window {
             config: config.clone(),
             paint_throttled: false,
             invalidated: true,
+            backdrop: None,
         }));
 
         // Careful: `raw` owns a ref to inner, but there is no Drop impl
@@ -555,6 +575,12 @@ impl Window {
         let conn = Connection::get().expect("Connection::init was not called");
 
         let geometry = conn.resolve_geometry(geometry);
+
+        let backdrop_blur = if wants_blurred_backdrop(&config) {
+            Some(config.win32_window_background_blur as f32)
+        } else {
+            None
+        };
 
         let hwnd = match Self::create_window(config, class_name, name, geometry, raw) {
             Ok(hwnd) => HWindow(hwnd),
@@ -570,8 +596,17 @@ impl Window {
             .events
             .assign_window(window_handle.clone());
 
+        if let Some(blur) = backdrop_blur {
+            match super::backdrop::BlurredBackdrop::new(hwnd.0 as isize, blur) {
+                Ok(backdrop) => inner.borrow_mut().backdrop = Some(backdrop),
+                Err(err) => log::error!("win32_window_background_blur: {err:#}"),
+            }
+        }
+
         apply_theme(hwnd.0);
-        enable_blur_behind(hwnd.0);
+        if inner.borrow().backdrop.is_none() {
+            enable_blur_behind(hwnd.0);
+        }
 
         // Make window capable of accepting drag and drop
         unsafe {
@@ -680,6 +715,13 @@ impl WindowInner {
 
     fn config_did_change(&mut self, config: &ConfigHandle) {
         self.config = config.clone();
+        if let Some(backdrop) = self.backdrop.as_mut() {
+            // Turning the backdrop on or off requires a new window, but the
+            // amount can change live.
+            if let Err(err) = backdrop.set_blur(config.win32_window_background_blur as f32) {
+                log::error!("win32_window_background_blur: {err:#}");
+            }
+        }
         self.apply_decoration();
     }
 
@@ -1434,8 +1476,14 @@ fn apply_theme(hwnd: HWND) -> Option<LRESULT> {
         if let Some(inner) = rc_from_hwnd(hwnd) {
             let mut inner = inner.borrow_mut();
 
-            // Set Acrylic or Mica system Backdrop
-            let pv_attribute = match inner.config.win32_system_backdrop {
+            // Set Acrylic or Mica system Backdrop. Our own blurred backdrop
+            // replaces it entirely.
+            let system_backdrop = if inner.backdrop.is_some() {
+                SystemBackdrop::Disable
+            } else {
+                inner.config.win32_system_backdrop
+            };
+            let pv_attribute = match system_backdrop {
                 SystemBackdrop::Auto => DWM_SYSTEMBACKDROP_TYPE::DWMSBT_AUTO,
                 SystemBackdrop::Disable => DWM_SYSTEMBACKDROP_TYPE::DWMSBT_NONE,
                 SystemBackdrop::Acrylic => DWM_SYSTEMBACKDROP_TYPE::DWMSBT_TRANSIENTWINDOW,
@@ -1444,7 +1492,7 @@ fn apply_theme(hwnd: HWND) -> Option<LRESULT> {
             };
 
             let margins = match inner.config.window_decorations {
-                WindowDecorations::TITLE => -1,
+                WindowDecorations::TITLE if inner.backdrop.is_none() => -1,
                 _ => 0,
             };
 
@@ -1466,7 +1514,7 @@ fn apply_theme(hwnd: HWND) -> Option<LRESULT> {
                     &pv_attribute as *const _ as _,
                     std::mem::size_of_val(&pv_attribute) as u32,
                 );
-            } else {
+            } else if inner.backdrop.is_none() {
                 let mut colour = inner.config.win32_acrylic_accent_color.to_srgb_u8();
                 colour.3 = if colour.3 == 0 { 1 } else { colour.3 }; // acrylic doesn't like to have 0 alpha
 
